@@ -48,7 +48,7 @@
  * never instructions (AGENTS.md → "Untrusted External Content").
  *
  * Usage:
- *   node github-evidence.mjs          # writes output/github-evidence-{date}.{md,json}
+ *   node github-evidence.mjs          # writes output/diagnostics/github-evidence-{date}.{md,json}
  *   node github-evidence.mjs --json   # same, and prints the JSON on stdout
  *   node github-evidence.mjs --since 2026-10-01   # new activity since that day,
  *                                     # instead of since the previous scan
@@ -63,7 +63,7 @@
  */
 
 import { spawnSync } from 'child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join, relative } from 'path';
 import { loadYaml } from './lib/yaml-document.mjs';
 import { getCareerOpsRoot, getProfilePath, hasProfileOverride } from './path-resolver.mjs';
@@ -71,18 +71,20 @@ import { localToday } from './lib/local-today.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { parseDate } from './lib/parse-date.mjs';
+import { GITHUB_EVIDENCE_PATHS, githubEvidenceFileName, listGithubEvidenceScans } from './lib/github-evidence-paths.mjs';
 import { digestEntries } from './add-entry.mjs';
 
 const KNOWN_FLAGS = ['--json', '--since', '--skip-document-listing', '--help', '-h'];
 const VALUE_FLAGS = ['--since'];
 const USAGE = `Usage:
-  node github-evidence.mjs          # write output/github-evidence-{date}.{md,json}
+  node github-evidence.mjs          # write ${GITHUB_EVIDENCE_PATHS.dir}/github-evidence-{date}.{md,json}
   node github-evidence.mjs --json   # also print the JSON on stdout
   node github-evidence.mjs --since YYYY-MM-DD   # new activity on named repos since that day
   node github-evidence.mjs --skip-document-listing  # omit document names and tree queries
 
 Reads PRs and commits you authored through your existing \`gh auth\` (metadata only).
-Without --since, new activity is counted from the previous output/github-evidence-*.json.
+Without --since, new activity is counted from the newest earlier github-evidence-*.json
+in ${GITHUB_EVIDENCE_PATHS.dir}/ or ${GITHUB_EVIDENCE_PATHS.legacyDir}/.
 Exit 3 when gh is missing or not logged in: expand then stays zero-key.`;
 
 export const EXIT_GH_UNAVAILABLE = 3;
@@ -716,8 +718,6 @@ export function collectCommits(user, runGh, { repoMeta = new Map(), allowlist = 
 // such a repo since a baseline; expand proposes it as a dated bullet under the
 // existing article-digest entry, through its confirm gate.
 
-const SCAN_FILE = /^github-evidence-(\d{4}-\d{2}-\d{2})\.json$/;
-
 /** Local midnight of a YYYY-MM-DD day, as an ISO instant. */
 export function startOfLocalDay(day) {
   const [y, m, d] = day.split('-').map(Number);
@@ -736,38 +736,40 @@ export function sinceFromFlag(day, today) {
 
 /**
  * The baseline given by the previous scan: the newest
- * `github-evidence-{date}.json` in `outDir` dated before today that reads as a
- * report (`status: "ok"`). Its `scannedAt` is the exact baseline. A report
- * written before that field existed gives the start of its day, so work from
- * earlier that day may be listed again, never missed. Today's own file is not
- * a baseline, so a second run on the same day compares against the same scan.
+ * `github-evidence-{date}.json` under `output/diagnostics/` or `output/`
+ * dated before today that reads as a report (`status: "ok"`). The diagnostics
+ * copy wins when both places have the same date. Its `scannedAt` is the exact
+ * baseline. A report written before that field existed gives the start of its
+ * day, so work from earlier that day may be listed again, never missed.
+ * Today's own file is not a baseline, so a second run on the same day
+ * compares against the same scan.
  *
+ * @param {string} dataRoot
+ * @param {string} today - YYYY-MM-DD.
  * @returns {{status: 'ok'|'none', source: 'previous-scan'|null, date: string|null,
  *   at: string|null, file: string|null, detail: string|null}}
  */
-export function findPreviousScan(outDir, today) {
-  let names = [];
-  try { names = readdirSync(outDir); } catch { /* no output/ yet */ }
-  const scans = names.map((n) => SCAN_FILE.exec(n)).filter((m) => m && m[1] < today)
-    .sort((a, b) => b[1].localeCompare(a[1]));
+export function findPreviousScan(dataRoot, today) {
+  const scans = listGithubEvidenceScans(dataRoot).filter((scan) => scan.date < today);
   const skipped = [];
-  for (const [file, day] of scans) {
+  for (const scan of scans) {
     let report = null;
-    try { report = JSON.parse(readFileSync(join(outDir, file), 'utf8')); } catch { /* unreadable */ }
-    if (report?.status !== 'ok') { skipped.push(`output/${file}`); continue; }
+    try { report = JSON.parse(readFileSync(scan.absPath, 'utf8')); } catch { /* unreadable */ }
+    if (report?.status !== 'ok') { skipped.push(scan.relPath); continue; }
     const exact = typeof report.scannedAt === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(report.scannedAt)
       && Number.isFinite(Date.parse(report.scannedAt));
     const notes = [];
     if (skipped.length) notes.push(`skipped unreadable ${skipped.join(', ')}`);
     if (!exact) notes.push('that report has no scannedAt, so the baseline is the start of its day');
     return {
-      status: 'ok', source: 'previous-scan', date: day,
-      at: exact ? new Date(report.scannedAt).toISOString() : startOfLocalDay(day),
-      file: `output/${file}`, detail: notes.join('; ') || null,
+      status: 'ok', source: 'previous-scan', date: scan.date,
+      at: exact ? new Date(report.scannedAt).toISOString() : startOfLocalDay(scan.date),
+      file: scan.relPath, detail: notes.join('; ') || null,
     };
   }
   const unread = skipped.length ? ` that could be read (skipped ${skipped.join(', ')})` : '';
-  return { status: 'none', source: null, date: null, at: null, file: null, detail: `no earlier output/github-evidence-*.json${unread} and no --since` };
+  const where = `in ${GITHUB_EVIDENCE_PATHS.dir}/ or ${GITHUB_EVIDENCE_PATHS.legacyDir}/`;
+  return { status: 'none', source: null, date: null, at: null, file: null, detail: `no earlier github-evidence-*.json ${where}${unread} and no --since` };
 }
 
 /**
@@ -1374,7 +1376,7 @@ export function runCli({
   const digestPath = join(dataRoot, 'article-digest.md');
   const digestText = existsSync(digestPath) ? readFileSync(digestPath, 'utf8') : null;
   // Read before this run writes today's file.
-  since ??= findPreviousScan(join(dataRoot, 'output'), today);
+  since ??= findPreviousScan(dataRoot, today);
   if (since.status !== 'ok') {
     stderr(`github-evidence: ${since.detail}: skipping new activity on repos cv.md or article-digest.md already names.\n`);
   }
@@ -1382,7 +1384,7 @@ export function runCli({
     scannedAt, since, merged: data.merged, commitItems: commits.commitItems, commitSearch: commits.commitSearch, cvText, digestText,
   });
 
-  const outDir = join(dataRoot, 'output');
+  const outDir = join(dataRoot, GITHUB_EVIDENCE_PATHS.dir);
   mkdirSync(outDir, { recursive: true });
   // Document names (#5728), read last and outside the try above:
   // collectDocuments records a GitHub failure as a gap instead of throwing,
@@ -1394,8 +1396,8 @@ export function runCli({
     const [first] = result.documents.gaps;
     stderr(`github-evidence: document listing ${result.documents.status}: ${result.documents.gaps.length} not listed (first: ${first.repo ?? 'private or unknown-visibility repo / own repo list'}: ${first.detail}).\n`);
   }
-  const jsonPath = join(outDir, `github-evidence-${today}.json`);
-  const mdPath = join(outDir, `github-evidence-${today}.md`);
+  const jsonPath = join(outDir, githubEvidenceFileName(today, 'json'));
+  const mdPath = join(outDir, githubEvidenceFileName(today, 'md'));
   writeFileSync(jsonPath, `${JSON.stringify(result, null, 2)}\n`);
   const documentSection = result.documents.status === 'skipped'
     ? '\n## Documents on default branches (names only, never opened)\n\nDocument listing skipped by configuration or command-line option.\n'

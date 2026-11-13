@@ -33,10 +33,14 @@ function sandbox({ github = 'https://github.com/jane-doe/', freshness = { enable
   return root;
 }
 
-/** Write output/github-evidence-{date}.json with its mtime at `writtenAt` (local time). */
-function scanFile(root, date, { user = USER, writtenAt = null, body = null } = {}) {
-  mkdirSync(join(root, 'output'), { recursive: true });
-  const path = join(root, 'output', `github-evidence-${date}.json`);
+/**
+ * Write a github-evidence JSON scan. `where: 'diagnostics'` is the current
+ * directory; `'output'` is the legacy fallback.
+ */
+function scanFile(root, date, { user = USER, writtenAt = null, body = null, where = 'output' } = {}) {
+  const dir = where === 'diagnostics' ? join(root, 'output', 'diagnostics') : join(root, 'output');
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `github-evidence-${date}.json`);
   writeFileSync(path, body ?? `${JSON.stringify({ status: 'ok', generatedAt: date, user })}\n`);
   if (writtenAt) utimesSync(path, writtenAt, writtenAt);
   return path;
@@ -280,6 +284,30 @@ try {
       `an mtime that is not on the scan's date falls back to the start of that day (${fallback?.since})`);
 
     check(findLatestScan(sandbox(), USER) === null, 'no output/ directory -> no scan');
+
+    const onlyNew = sandbox();
+    scanFile(onlyNew, '2026-10-17', { where: 'diagnostics', writtenAt: new Date(2026, 9, 17, 9, 0, 0) });
+    const fromDiagnostics = findLatestScan(onlyNew, USER);
+    check(fromDiagnostics?.date === '2026-10-17' && fromDiagnostics.file === 'output/diagnostics/github-evidence-2026-10-17.json',
+      `a scan only under output/diagnostics/ is the one that counts (got ${fromDiagnostics?.file})`);
+
+    const onlyOld = sandbox();
+    scanFile(onlyOld, '2026-10-11', { writtenAt: new Date(2026, 9, 11, 9, 0, 0) });
+    const fromLegacy = findLatestScan(onlyOld, USER);
+    check(fromLegacy?.file === 'output/github-evidence-2026-10-11.json',
+      'a scan only under output/ still counts (the fallback)');
+
+    const mixed = sandbox();
+    scanFile(mixed, '2026-10-04', { where: 'diagnostics', writtenAt: new Date(2026, 9, 4, 9, 0, 0) });
+    scanFile(mixed, '2026-10-16', { writtenAt: new Date(2026, 9, 16, 9, 0, 0) });
+    const newerLegacy = findLatestScan(mixed, USER);
+    check(newerLegacy?.date === '2026-10-16' && newerLegacy.file === 'output/github-evidence-2026-10-16.json',
+      `mixed locations: the newest date wins, including a legacy file newer than diagnostics (got ${newerLegacy?.file})`);
+    scanFile(mixed, '2026-10-16', { where: 'diagnostics', writtenAt: new Date(2026, 9, 16, 15, 0, 0) });
+    const tie = findLatestScan(mixed, USER);
+    check(tie?.file === 'output/diagnostics/github-evidence-2026-10-16.json'
+      && tie.since === new Date(2026, 9, 16, 15, 0, 0).toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      'the same date in both places keeps the diagnostics file, and its mtime');
   }
 
   // ── 9. Read-only, and the real entry point ─────────────────────────

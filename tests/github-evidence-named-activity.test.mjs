@@ -165,10 +165,10 @@ function evidence({ since = SINCE, commitSearch = { status: 'ok', total: 7, read
 // ── 4. No baseline, and the commit search's limits ──────────────────
 
 {
-  const none = { status: 'none', source: null, date: null, at: null, file: null, detail: 'no earlier output/github-evidence-*.json and no --since' };
+  const none = { status: 'none', source: null, date: null, at: null, file: null, detail: 'no earlier github-evidence-*.json in output/diagnostics/ or output/ and no --since' };
   const result = evidence({ since: none });
   check(result.claimCheck.namedWithNewActivity.length === 0 && result.since.status === 'none', 'no previous scan and no --since: the list is skipped');
-  check(renderMarkdown(result).includes('Skipped: no earlier output/github-evidence-*.json and no --since. Rerun with `--since YYYY-MM-DD`'),
+  check(renderMarkdown(result).includes('Skipped: no earlier github-evidence-*.json in output/diagnostics/ or output/ and no --since. Rerun with `--since YYYY-MM-DD`'),
     'and the Markdown says so');
 
   const cut = evidence({ commitSearch: { status: 'partial', total: 5000, read: 1000, detail: 'cap' }, f: (() => {
@@ -208,11 +208,13 @@ function evidence({ since = SINCE, commitSearch = { status: 'ok', total: 7, read
   try {
     check(findPreviousScan(join(dir, 'missing'), '2026-10-22').status === 'none', 'no output/ directory: no previous scan');
     const report = (extra) => JSON.stringify({ status: 'ok', generatedAt: 'x', ...extra });
-    writeFileSync(join(dir, 'github-evidence-2026-10-01.json'), report({ scannedAt: '2026-10-01T06:00:00.000Z' }));
-    writeFileSync(join(dir, 'github-evidence-2026-10-15.json'), report({}));
-    writeFileSync(join(dir, 'github-evidence-2026-10-20.json'), '{ not json');
-    writeFileSync(join(dir, 'github-evidence-2026-10-22.json'), report({ scannedAt: '2026-10-22T01:00:00.000Z' }));
-    writeFileSync(join(dir, 'github-evidence-2026-10-21.md'), '# not the JSON');
+    const legacy = join(dir, 'output');
+    mkdirSync(legacy);
+    writeFileSync(join(legacy, 'github-evidence-2026-10-01.json'), report({ scannedAt: '2026-10-01T06:00:00.000Z' }));
+    writeFileSync(join(legacy, 'github-evidence-2026-10-15.json'), report({}));
+    writeFileSync(join(legacy, 'github-evidence-2026-10-20.json'), '{ not json');
+    writeFileSync(join(legacy, 'github-evidence-2026-10-22.json'), report({ scannedAt: '2026-10-22T01:00:00.000Z' }));
+    writeFileSync(join(legacy, 'github-evidence-2026-10-21.md'), '# not the JSON');
     const found = findPreviousScan(dir, '2026-10-22');
     check(found.status === 'ok' && found.file === 'output/github-evidence-2026-10-15.json',
       `previous scan: newest readable report dated before today; today's own file is skipped (got ${found.file})`);
@@ -221,6 +223,24 @@ function evidence({ since = SINCE, commitSearch = { status: 'ok', total: 7, read
     const exact = findPreviousScan(dir, '2026-10-15');
     check(exact.at === '2026-10-01T06:00:00.000Z' && exact.detail === null, 'a report with scannedAt is the exact baseline');
     check(findPreviousScan(dir, '2026-10-01').status === 'none', 'nothing dated before today: no previous scan');
+
+    const mixed = mkdtempSync(join(tmpdir(), 'co-gh-since-mixed-'));
+    const mixedLegacy = join(mixed, 'output');
+    const mixedNew = join(mixedLegacy, 'diagnostics');
+    mkdirSync(mixedNew, { recursive: true });
+    writeFileSync(join(mixedLegacy, 'github-evidence-2026-10-19.json'), report({ scannedAt: '2026-10-19T02:00:00.000Z' }));
+    writeFileSync(join(mixedNew, 'github-evidence-2026-10-12.json'), report({ scannedAt: '2026-10-12T02:00:00.000Z' }));
+    writeFileSync(join(mixedNew, 'github-evidence-2026-10-21.json'), '{ not json');
+    const picked = findPreviousScan(mixed, '2026-10-22');
+    check(picked.file === 'output/github-evidence-2026-10-19.json' && picked.at === '2026-10-19T02:00:00.000Z',
+      `mixed locations: the newest readable date wins, even when it is the legacy file (got ${picked.file})`);
+    check(/skipped unreadable output\/diagnostics\/github-evidence-2026-10-21\.json/.test(picked.detail),
+      'an unreadable newer diagnostics file is skipped and named');
+    writeFileSync(join(mixedNew, 'github-evidence-2026-10-19.json'), report({ scannedAt: '2026-10-19T04:00:00.000Z' }));
+    const tie = findPreviousScan(mixed, '2026-10-21');
+    check(tie.file === 'output/diagnostics/github-evidence-2026-10-19.json' && tie.at === '2026-10-19T04:00:00.000Z',
+      'the same date in both places keeps the diagnostics copy');
+    rmSync(mixed, { recursive: true, force: true });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 
   check(namedWithNewActivity({ result: evidence(), since: null }).length === 0, 'namedWithNewActivity without a baseline returns nothing');
@@ -276,12 +296,12 @@ function cli(root, args = ['--json'], runGh = fakeGh().runner) {
   try {
     const res = cli(root);
     check(res.code === 0, res.code === 0 ? 'CLI with a previous scan -> exit 0' : `CLI with a previous scan -> exit 0 (got ${res.code}: ${res.err.trim()})`);
-    const written = JSON.parse(readFileSync(join(root, 'output', 'github-evidence-2026-10-22.json'), 'utf8'));
+    const written = JSON.parse(readFileSync(join(root, 'output', 'diagnostics', 'github-evidence-2026-10-22.json'), 'utf8'));
     check(written.scannedAt === '2026-10-22T09:00:00.000Z' && written.since.source === 'previous-scan' && written.since.at === SCANNED,
       'CLI: the written report has scannedAt and uses the previous scan as its baseline');
     const w = written.claimCheck.namedWithNewActivity.find((r) => r.repo === 'acme/widgets');
     check(w?.newMerged === 2 && w.newCommits?.count === 2, `CLI: commit times come through the commit search (got ${JSON.stringify(w && { m: w.newMerged, c: w.newCommits })})`);
-    check(readFileSync(join(root, 'output', 'github-evidence-2026-10-22.md'), 'utf8').includes('## Named in cv.md or article-digest.md: new activity'),
+    check(readFileSync(join(root, 'output', 'diagnostics', 'github-evidence-2026-10-22.md'), 'utf8').includes('## Named in cv.md or article-digest.md: new activity'),
       'CLI: the Markdown report has the section');
     check(readFileSync(join(root, 'article-digest.md'), 'utf8') === digestBefore, 'CLI: article-digest.md is never modified');
 
@@ -301,7 +321,7 @@ function cli(root, args = ['--json'], runGh = fakeGh().runner) {
     const printed = JSON.parse(res.out);
     check(res.code === 0 && printed.since.status === 'none' && printed.claimCheck.namedWithNewActivity.length === 0,
       'CLI without a previous scan: exit 0, the list is skipped');
-    check(/no earlier output\/github-evidence-\*\.json and no --since: skipping new activity/.test(res.err), 'CLI without a previous scan: stderr says so');
+    check(/no earlier github-evidence-\*\.json in output\/diagnostics\/ or output\/ and no --since: skipping new activity/.test(res.err), 'CLI without a previous scan: stderr says so');
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
@@ -313,7 +333,9 @@ function cli(root, args = ['--json'], runGh = fakeGh().runner) {
       const res = cli(root, bad, runner);
       check(res.code === 1 && calls.length === 0 && /--since takes a date/.test(res.err), `${bad.join(' ')} -> exit 1 before any gh call`);
     }
-    check(!existsSync(join(root, 'output', 'github-evidence-2026-10-22.json')), 'a rejected --since writes nothing');
+    check(!existsSync(join(root, 'output', 'diagnostics', 'github-evidence-2026-10-22.json'))
+      && !existsSync(join(root, 'output', 'github-evidence-2026-10-22.json')),
+      'a rejected --since writes nothing');
   } finally { rmSync(root, { recursive: true, force: true }); }
   const missing = spawnSync(NODE, [join(ROOT, 'github-evidence.mjs'), '--since'], { encoding: 'utf8', timeout: 30000 });
   check(missing.status === 1 && /--since/.test(missing.stderr), '--since with no value fails fast at the command line');

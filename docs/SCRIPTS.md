@@ -689,7 +689,7 @@ reads source code or file contents and never writes `cv.md`. Candidates reach
 `add-entry.mjs`.
 
 ```bash
-node github-evidence.mjs          # writes output/github-evidence-{date}.{md,json}
+node github-evidence.mjs          # writes output/diagnostics/github-evidence-{date}.{md,json}
 node github-evidence.mjs --json   # same, and prints the JSON on stdout
 node github-evidence.mjs --skip-document-listing # omit document names and tree queries
 ```
@@ -1845,7 +1845,7 @@ These have no `npm run` binding — modes and agents call them with
 | `node install-latex-engine.mjs [--check] [--force] [--json] [--help]` | Opt-in local LaTeX engine: downloads a pinned tectonic release for this platform, verifies its SHA-256 before extracting, and places it in the repo root (gitignored) where `generate-latex.mjs` looks first. Downloads are bounded by a timeout and a size cap. No-op when tectonic is already available (a pdflatex-only host still gets tectonic, which the CJK template needs); `--check` never downloads |
 | `node classify-tier.mjs` | Classify a job title into intern / entry / mid / senior |
 | `node ats-payload.mjs <payload.json> [--summary]` | ATS payload transform: folds `competencies[]` into `skills[]` (one safe, idempotent transform) and reports three judgement calls it deliberately does not apply. Payload on stdout, findings on stderr |
-| `node evidence-freshness.mjs` | Opt-in. Before Block A in `oferta` and `auto-pipeline`, once per run in batch: says whether the GitHub evidence behind `cv.md` is stale (age of the newest `output/github-evidence-*.json`, plus PRs authored and merged since in repos the user does not own, from one metadata-only `gh search prs`). Read-only, always exit 0, JSON on stdout. See [evidence-freshness.mjs](#evidence-freshnessmjs) |
+| `node evidence-freshness.mjs` | Opt-in. Before Block A in `oferta` and `auto-pipeline`, once per run in batch: says whether the GitHub evidence behind `cv.md` is stale (age of the newest `output/diagnostics/github-evidence-*.json`, falling back to `output/`, plus PRs authored and merged since in repos the user does not own, from one metadata-only `gh search prs`). Read-only, always exit 0, JSON on stdout. See [evidence-freshness.mjs](#evidence-freshnessmjs) |
 | `node plugins.mjs list\|run <id> [hook]` | CLI host for non-provider plugin hooks (see [PLUGINS.md](PLUGINS.md)) |
 | `node plugin-install.mjs [--help]` | Clone/scaffold/validate community plugins (allowlisted URLs, pinned SHA); the engine behind the `plugins.mjs` new/add commands, which `--help` points at |
 | `node plugin-audit.mjs` | Static safety scan for community/registry plugins |
@@ -1954,7 +1954,8 @@ Says whether the GitHub evidence an evaluation scores against is stale.
 `oferta`, `auto-pipeline` and batch workers read `cv.md`, `article-digest.md`
 and the profile, and GitHub work reaches those only when the user runs
 `expand`, whose optional step (`github-evidence.mjs`) writes
-`output/github-evidence-{date}.{md,json}`. The modes run this once, after their
+`output/diagnostics/github-evidence-{date}.{md,json}` (an older file still in
+`output/` counts). The modes run this once, after their
 gates and before Block A. `batch-runner.sh` runs it once per batch run, before
 the first offer, and appends the JSON to every worker's prompt, so a batch
 makes one `gh` call however many offers it has.
@@ -1966,8 +1967,9 @@ The check is opt-in: it does nothing (status `disabled`, no `gh` call) unless
 node evidence-freshness.mjs   # JSON on stdout, always exit 0
 ```
 
-- Finds the newest `output/github-evidence-{YYYY-MM-DD}.json` (a file that does
-  not parse, or that records another `user`, is skipped) and reads
+- Finds the newest `github-evidence-{YYYY-MM-DD}.json` under
+  `output/diagnostics/`, then `output/` (a file that does not parse, or that
+  records another `user`, is skipped) and reads
   `candidate.github` from the profile, normalized the way `expand` does it.
 - Makes one metadata-only call through the user's existing `gh auth`:
   `gh search prs --author <user> --merged --merged-at ">=<scan time>" --limit 100 --json repository -- -user:<user>`.
